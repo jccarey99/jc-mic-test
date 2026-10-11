@@ -5,23 +5,27 @@
 <meta name="viewport" content="width=device-width,initial-scale=1,viewport-fit=cover">
 <title>JC Mic Test</title>
 <style>
-:root{--bg:#f7f6f2;--fg:#1d1d1b;--muted:#6b6a65;--card:#fff;--line:#e3e1da;--go:#1f7a4d;--stop:#b3261e;--warn:#9a6700}
-@media (prefers-color-scheme:dark){:root{--bg:#161615;--fg:#f1f0ec;--muted:#a3a29c;--card:#222220;--line:#34332f;--go:#3fb47a;--stop:#e5675f;--warn:#e0b24a}}
+:root{--bg:#f7f6f2;--fg:#1d1d1b;--muted:#6b6a65;--card:#fff;--line:#e3e1da;--go:#1f7a4d;--stop:#b3261e;--warn:#9a6700;--meter:#1f7a4d}
+@media (prefers-color-scheme:dark){:root{--bg:#161615;--fg:#f1f0ec;--muted:#a3a29c;--card:#222220;--line:#34332f;--go:#3fb47a;--stop:#e5675f;--warn:#e0b24a;--meter:#3fb47a}}
 *{box-sizing:border-box}
 body{margin:0;background:var(--bg);color:var(--fg);font:16px/1.45 -apple-system,system-ui,sans-serif;padding:16px;padding-bottom:40px}
 main{max-width:520px;margin:0 auto}
 h1{font-size:22px;margin:4px 0 2px}
 p.sub{color:var(--muted);margin:0 0 16px;font-size:14px}
 .card{background:var(--card);border:1px solid var(--line);border-radius:14px;padding:16px;margin-bottom:14px}
-.status{font-size:18px;font-weight:600}
-.saved{font-size:15px;color:var(--muted);margin-top:4px}
-.big{font-size:44px;font-variant-numeric:tabular-nums;font-weight:700;margin:8px 0}
+.qnum{color:var(--muted);font-size:13px;text-transform:uppercase;letter-spacing:.04em}
+.q{font-size:22px;font-weight:650;margin:6px 0 10px}
+.status{font-size:17px;font-weight:600}
+.saved{font-size:14px;color:var(--muted);margin-top:4px}
+.meter{height:10px;background:var(--line);border-radius:6px;overflow:hidden;margin-top:10px}
+.meter i{display:block;height:100%;width:0;background:var(--meter);transition:width .1s}
 button{font:inherit;font-weight:600;border:0;border-radius:12px;padding:16px;width:100%;margin-top:10px;cursor:pointer}
-#rec{background:var(--go);color:#fff}
-#stop{background:var(--stop);color:#fff}
+.go{background:var(--go);color:#fff}
+.stop{background:var(--stop);color:#fff}
 .sec{background:transparent;border:1px solid var(--line);color:var(--fg);padding:12px}
 button:disabled{opacity:.4}
 .warn{color:var(--warn)}
+.hide{display:none}
 ol{padding-left:20px;margin:6px 0}
 li{margin:4px 0}
 .take{border-top:1px solid var(--line);padding:10px 0}
@@ -33,28 +37,31 @@ pre{white-space:pre-wrap;word-break:break-word;font:12px/1.4 ui-monospace,Menlo,
 <body>
 <main>
 <h1>JC Mic Test</h1>
-<p class="sub">Audio stays on this phone. Nothing is uploaded. Build 2026-10-11-c2</p>
+<p class="sub">Practice journal: 3 questions, read aloud, mic stays on. Audio stays on this phone. Build 2026-10-11-j1</p>
 
 <div class="card">
-  <div class="status" id="status">Ready. Tap Record.</div>
-  <div class="big" id="clock">0:00</div>
+  <div class="qnum" id="qnum">Not started</div>
+  <div class="q" id="q">Tap Start, then just talk.</div>
+  <div class="status" id="status">Phone on the counter is fine. Volume up.</div>
+  <div class="meter"><i id="lvl"></i></div>
   <div class="saved" id="saved">Saved on phone: 0 s</div>
-  <button id="rec">Record</button>
-  <button id="stop" disabled>Stop</button>
+  <button class="go" id="start">Start journal</button>
+  <button class="go hide" id="resume">Mic was cut off — tap to resume</button>
+  <button class="sec hide" id="next">Next question (backup)</button>
+  <button class="sec hide" id="end">End journal</button>
 </div>
 
 <div class="card">
-  <strong>The 3 tests</strong>
+  <strong>How to test</strong>
   <ol>
-    <li>Record about 20 s, tap Stop, play it back below.</li>
-    <li>Record, switch to another app for 5 s, come back, keep talking, Stop, play back.</li>
-    <li>Turn on airplane mode, repeat test 1.</li>
+    <li>Tap Start. Listen to each question, answer, then pause about 3 seconds. It moves on by itself. (In the real journal you'll say "next".)</li>
+    <li>During question 2, switch to another app for 5 s, then come back and keep going.</li>
+    <li>When done, play your answers below, then tap <b>Copy results</b> and paste them to Claude.</li>
   </ol>
-  Then tap <b>Copy results</b> and paste them to Claude.
 </div>
 
 <div class="card">
-  <strong>Saved recordings</strong>
+  <strong>Saved answers</strong>
   <div id="takes"><p class="sub">None yet.</p></div>
 </div>
 
@@ -69,39 +76,37 @@ pre{white-space:pre-wrap;word-break:break-word;font:12px/1.4 ui-monospace,Menlo,
 <script>
 (() => {
   const $ = id => document.getElementById(id);
-  const BUILD = '2026-10-11-c2';
+  const BUILD = '2026-10-11-j1';
+  const QUESTIONS = ['What time did you go to sleep last night?', 'How did you sleep, from one to ten?', 'What is your top priority today?'];
+  const SILENCE_MS = 3000, MIN_SPEECH_MS = 800;
   const DB = 'jc-mic-test', STORE = 'chunks';
-  let db, stream, track, rec, take = null, seg = 0, seq = 0, startedAt = 0, savedMs = 0, tick, wantRecording = false;
+  let db, stream, track, rec, ac, analyser, buf, vadTimer;
+  let session = null, qi = -1, part = 0, savedMs = 0, phase = 'idle';
+  let speechMs = 0, silenceMs = 0, floor = 1, calibrating = 0;
   const logLines = [];
 
   function log(msg) {
     const line = new Date().toISOString().slice(11, 23) + ' ' + msg;
     logLines.push(line);
-    $('log').textContent = logLines.slice(-200).join('\n');
+    $('log').textContent = logLines.slice(-250).join('\n');
   }
   function status(t, cls) { $('status').textContent = t; $('status').className = 'status ' + (cls || ''); }
-  function fmt(ms) { const s = Math.round(ms / 1000); return Math.floor(s / 60) + ':' + String(s % 60).padStart(2, '0'); }
+  function show(id, on) { $(id).classList.toggle('hide', !on); }
+  function micState() { return track ? 'track=' + track.readyState + ' muted=' + track.muted : 'no track'; }
 
+  // ---------- storage ----------
   function openDb() {
     return new Promise((res, rej) => {
-      const r = indexedDB.open(DB, 1);
-      r.onupgradeneeded = () => r.result.createObjectStore(STORE, { keyPath: ['take', 'seg', 'seq'] });
-      r.onsuccess = () => res(r.result);
-      r.onerror = () => rej(r.error);
+      const r = indexedDB.open(DB, 2);
+      r.onupgradeneeded = () => { if (r.result.objectStoreNames.contains(STORE)) r.result.deleteObjectStore(STORE); r.result.createObjectStore(STORE, { keyPath: ['session', 'q', 'part', 'seq'] }); };
+      r.onsuccess = () => res(r.result); r.onerror = () => rej(r.error);
     });
   }
   function put(row) {
-    return new Promise((res, rej) => {
-      const tx = db.transaction(STORE, 'readwrite');
-      tx.objectStore(STORE).put(row);
-      tx.oncomplete = res; tx.onerror = () => rej(tx.error);
-    });
+    return new Promise((res, rej) => { const tx = db.transaction(STORE, 'readwrite'); tx.objectStore(STORE).put(row); tx.oncomplete = res; tx.onerror = () => rej(tx.error); });
   }
   function all() {
-    return new Promise((res, rej) => {
-      const r = db.transaction(STORE).objectStore(STORE).getAll();
-      r.onsuccess = () => res(r.result); r.onerror = () => rej(r.error);
-    });
+    return new Promise((res, rej) => { const r = db.transaction(STORE).objectStore(STORE).getAll(); r.onsuccess = () => res(r.result); r.onerror = () => rej(r.error); });
   }
 
   function pickType() {
@@ -110,91 +115,165 @@ pre{white-space:pre-wrap;word-break:break-word;font:12px/1.4 ui-monospace,Menlo,
     return '';
   }
 
-  // One segment = one MediaRecorder run. A take can have several segments if iOS kills the mic.
-  async function startSegment() {
-    try {
-      stream = await navigator.mediaDevices.getUserMedia({ audio: true });
-    } catch (e) {
-      log('getUserMedia FAILED ' + e.name + ': ' + e.message);
-      status('Microphone blocked: ' + e.name, 'warn');
-      wantRecording = false; buttons(); return;
-    }
+  // ---------- mic: opened once per journal ----------
+  async function openMic() {
+    try { stream = await navigator.mediaDevices.getUserMedia({ audio: true }); }
+    catch (e) { log('getUserMedia FAILED ' + e.name + ': ' + e.message); status('Microphone blocked: ' + e.name, 'warn'); return false; }
     track = stream.getAudioTracks()[0];
-    log('mic ready: ' + (track.label || 'audio') + ' state=' + track.readyState + ' muted=' + track.muted);
-    track.onmute = () => { log('track MUTE (iPhone paused mic) — still recording'); status('iPhone paused the mic. Keep going or wait…', 'warn'); };
-    track.onunmute = () => { log('track unmute'); status('Recording…'); };
-    track.onended = () => { log('track ENDED by system'); };
+    log('mic open: ' + micState());
+    track.onmute = () => { log('track MUTE while ' + phase + ' (q' + (qi + 1) + ')'); if (phase === 'listening') status('iPhone paused the mic… keep talking when it returns', 'warn'); };
+    track.onunmute = () => { log('track unmute while ' + phase); if (phase === 'listening') status('Listening…'); };
+    track.onended = () => { log('track ENDED by system while ' + phase + ' (q' + (qi + 1) + ')'); micLost(); };
+    try {
+      if (!ac) ac = new (window.AudioContext || window.webkitAudioContext)();
+      ac.onstatechange = () => log('audio context ' + ac.state);
+      if (ac.state !== 'running') await ac.resume();
+      const src = ac.createMediaStreamSource(stream);
+      analyser = ac.createAnalyser(); analyser.fftSize = 1024; buf = new Float32Array(analyser.fftSize);
+      src.connect(analyser);
+    } catch (e) { log('level meter unavailable: ' + e); }
+    return true;
+  }
 
+  // one recorder per question part; the mic stream itself stays open
+  function startRecorder() {
     const type = pickType();
     rec = new MediaRecorder(stream, type ? { mimeType: type } : undefined);
-    const mySeg = ++seg, myTake = take; let mySeq = 0;
+    const my = { session, q: qi, part: ++part }; let seq = 0;
     rec.ondataavailable = async e => {
       if (!e.data || !e.data.size) return;
-      const row = { take: myTake, seg: mySeg, seq: mySeq++, blob: e.data, type: rec.mimeType || type, t: Date.now() };
-      try { await put(row); savedMs += 1000; $('saved').textContent = 'Saved on phone: ' + Math.round(savedMs / 1000) + ' s'; }
+      try { await put({ ...my, seq: seq++, blob: e.data, type: rec.mimeType || type, t: Date.now() }); savedMs += 1000; $('saved').textContent = 'Saved on phone: ' + Math.round(savedMs / 1000) + ' s'; }
       catch (err) { log('SAVE FAILED ' + err); }
     };
-    rec.onstop = () => {
-      log('recorder stopped (segment ' + mySeg + ')');
-      stream.getTracks().forEach(t => t.stop());
-      if (wantRecording) { // stopped by the system, not by JC
-        status('Mic was cut off. Audio so far is saved. Tap Record to continue.', 'warn');
-        wantRecording = false; buttons(); clearInterval(tick);
-      }
-      renderTakes();
-    };
+    rec.onstop = () => { log('recorder stopped q' + (my.q + 1) + ' part ' + my.part); renderTakes(); };
     rec.onerror = e => log('recorder ERROR ' + (e.error && e.error.name));
     rec.start(1000);
-    log('recording segment ' + mySeg + ' as ' + (rec.mimeType || type || 'default'));
-    status('Recording…');
+    log('recording q' + (qi + 1) + ' part ' + my.part + ' as ' + (rec.mimeType || type || 'default') + ' ' + micState());
   }
-
-  async function record() {
-    if (!take) { take = 'T' + new Date().toISOString().slice(5, 19).replace(/[-:T]/g, ''); seg = 0; savedMs = 0; startedAt = Date.now(); log('--- new take ' + take); }
-    wantRecording = true; buttons();
-    clearInterval(tick); tick = setInterval(() => $('clock').textContent = fmt(Date.now() - startedAt), 250);
-    await startSegment();
-  }
-
-  function stop() {
-    wantRecording = false; buttons(); clearInterval(tick);
+  function stopRecorder() {
     if (rec && rec.state !== 'inactive') { try { rec.requestData(); } catch (e) {} rec.stop(); }
-    log('JC tapped Stop. take ' + take + ' saved ~' + Math.round(savedMs / 1000) + ' s');
-    status('Stopped. ' + Math.round(savedMs / 1000) + ' s saved. Play it below.');
-    take = null;
   }
 
-  function buttons() { $('rec').disabled = wantRecording; $('stop').disabled = !wantRecording; $('rec').textContent = take ? 'Continue recording' : 'Record'; }
+  // ---------- question reading ----------
+  function speak(text) {
+    return new Promise(res => {
+      if (!window.speechSynthesis) { log('no speechSynthesis'); return res(); }
+      const u = new SpeechSynthesisUtterance(text); u.rate = 1.0;
+      let done = false; const fin = why => { if (done) return; done = true; log('question audio ' + why + ' ' + micState()); res(); };
+      u.onstart = () => log('question audio start ' + micState());
+      u.onend = () => fin('end'); u.onerror = e => fin('ERROR ' + e.error);
+      setTimeout(() => fin('timeout'), 12000);
+      speechSynthesis.cancel(); speechSynthesis.speak(u);
+    });
+  }
+
+  async function ask(i) {
+    qi = i; part = 0;
+    $('qnum').textContent = 'Question ' + (i + 1) + ' of ' + QUESTIONS.length;
+    $('q').textContent = QUESTIONS[i];
+    phase = 'reading'; status('Reading question…');
+    await speak(QUESTIONS[i]);
+    if (phase !== 'reading' || qi !== i) return;
+    listen();
+  }
+
+  function listen() {
+    if (!track || track.readyState !== 'live') { micLost(); return; }
+    phase = 'listening'; speechMs = 0; silenceMs = 0; calibrating = 600; floor = 1;
+    status('Listening… answer, then pause');
+    startRecorder();
+  }
+
+  function advance(why) {
+    if (phase !== 'listening') return;
+    log('advance after q' + (qi + 1) + ' (' + why + ')');
+    stopRecorder();
+    if (qi + 1 < QUESTIONS.length) ask(qi + 1); else finish();
+  }
+
+  function finish() {
+    phase = 'done'; stopRecorder();
+    if (stream) stream.getTracks().forEach(t => t.stop());
+    track = null; clearInterval(vadTimer);
+    $('qnum').textContent = 'Done'; $('q').textContent = 'Journal complete.';
+    status('Done. ' + Math.round(savedMs / 1000) + ' s saved. Play your answers below.');
+    show('start', true); $('start').textContent = 'Start again'; show('next', false); show('end', false); show('resume', false);
+    log('journal finished, ~' + Math.round(savedMs / 1000) + ' s saved');
+  }
+
+  function micLost() {
+    if (phase === 'done' || phase === 'lost') return;
+    phase = 'lost'; stopRecorder();
+    status('The iPhone cut the mic. Your audio so far is saved.', 'warn');
+    show('resume', true);
+  }
+
+  // ---------- pause detection (test stand-in for saying "next") ----------
+  function vad() {
+    if (!analyser) return;
+    analyser.getFloatTimeDomainData(buf);
+    let s = 0; for (let i = 0; i < buf.length; i++) s += buf[i] * buf[i];
+    const rms = Math.sqrt(s / buf.length);
+    $('lvl').style.width = Math.min(100, rms * 600) + '%';
+    if (phase !== 'listening') return;
+    if (calibrating > 0) { floor = Math.min(floor, rms); calibrating -= 100; return; }
+    const thr = Math.max(0.012, floor * 3);
+    if (rms > thr) { speechMs += 100; silenceMs = 0; }
+    else { silenceMs += 100; if (speechMs >= MIN_SPEECH_MS && silenceMs >= SILENCE_MS) advance('pause'); }
+  }
+
+  // ---------- buttons ----------
+  $('start').onclick = async () => {
+    // unlock speech on iOS inside the tap
+    try { speechSynthesis.speak(new SpeechSynthesisUtterance('')); } catch (e) {}
+    session = 'J' + new Date().toISOString().slice(5, 19).replace(/[-:T]/g, ''); savedMs = 0;
+    log('--- journal ' + session + ' ' + navigator.userAgent);
+    show('start', false);
+    if (!(await openMic())) { show('start', true); return; }
+    show('next', true); show('end', true);
+    clearInterval(vadTimer); vadTimer = setInterval(vad, 100);
+    ask(0);
+  };
+  $('resume').onclick = async () => {
+    log('JC tapped resume');
+    show('resume', false);
+    if (!(await openMic())) { show('resume', true); return; }
+    phase = 'listening-resume'; listen();
+  };
+  $('next').onclick = () => { log('JC tapped Next'); if (phase === 'reading') { speechSynthesis.cancel(); } else advance('button'); };
+  $('end').onclick = () => { log('JC tapped End'); finish(); };
 
   async function renderTakes() {
     const rows = await all();
     const groups = {};
-    rows.forEach(r => { const k = r.take + '|' + r.seg; (groups[k] = groups[k] || []).push(r); });
+    rows.forEach(r => { const k = r.session + '|' + r.q + '|' + r.part; (groups[k] = groups[k] || []).push(r); });
     const keys = Object.keys(groups).sort().reverse();
     const box = $('takes'); box.innerHTML = '';
     if (!keys.length) { box.innerHTML = '<p class="sub">None yet.</p>'; return; }
     keys.forEach(k => {
       const g = groups[k].sort((a, b) => a.seq - b.seq);
       const blob = new Blob(g.map(r => r.blob), { type: g[0].type || 'audio/mp4' });
+      const [s, q, p] = k.split('|');
       const d = document.createElement('div'); d.className = 'take';
-      const [t, s] = k.split('|');
-      d.innerHTML = '<div><b>' + t + '</b> part ' + s + ' · ~' + g.length + ' s · ' + Math.round(blob.size / 1024) + ' KB</div>';
+      const head = document.createElement('div');
+      head.textContent = s + ' · Q' + (+q + 1) + (p > 1 ? ' part ' + p : '') + ' · ~' + g.length + ' s · ' + Math.round(blob.size / 1024) + ' KB';
       const a = document.createElement('audio'); a.controls = true; a.preload = 'metadata'; a.src = URL.createObjectURL(blob);
-      d.appendChild(a); box.appendChild(d);
+      d.appendChild(head); d.appendChild(a); box.appendChild(d);
     });
   }
 
   document.addEventListener('visibilitychange', () => {
-    log('page ' + document.visibilityState + (wantRecording ? ' (recording continues)' : ''));
+    log('page ' + document.visibilityState + ' while ' + phase + ' ' + micState() + (ac ? ' ctx=' + ac.state : ''));
     if (document.visibilityState === 'hidden' && rec && rec.state === 'recording') { try { rec.requestData(); } catch (e) {} }
-    if (document.visibilityState === 'visible' && track) log('on return: track=' + track.readyState + ' muted=' + track.muted + ' recorder=' + (rec && rec.state));
+    if (document.visibilityState === 'visible') {
+      if (ac && ac.state !== 'running') ac.resume().catch(() => {});
+      if (phase === 'listening' && (!track || track.readyState !== 'live')) micLost();
+    }
   });
   window.addEventListener('pagehide', () => { log('pagehide'); if (rec && rec.state === 'recording') try { rec.requestData(); } catch (e) {} });
   window.addEventListener('online', () => log('network online'));
   window.addEventListener('offline', () => log('network offline'));
 
-  $('rec').onclick = record;
-  $('stop').onclick = stop;
   $('copy').onclick = async () => {
     const txt = 'JC Mic Test ' + BUILD + '\n' + navigator.userAgent + '\nstandalone=' + (navigator.standalone || matchMedia('(display-mode: standalone)').matches) + '\n' + logLines.join('\n');
     try { await navigator.clipboard.writeText(txt); log('results copied'); } catch (e) { log('copy failed — select the log text manually'); }
@@ -204,7 +283,7 @@ pre{white-space:pre-wrap;word-break:break-word;font:12px/1.4 ui-monospace,Menlo,
     db.transaction(STORE, 'readwrite').objectStore(STORE).clear().onsuccess = () => { log('test recordings deleted'); renderTakes(); };
   };
 
-  openDb().then(d => { db = d; log('ready. build ' + BUILD + ' recorderType=' + (pickType() || 'default') + ' online=' + navigator.onLine); renderTakes(); })
+  openDb().then(d => { db = d; log('ready. build ' + BUILD + ' recorderType=' + (pickType() || 'default') + ' tts=' + !!window.speechSynthesis + ' online=' + navigator.onLine); renderTakes(); })
     .catch(e => { log('IndexedDB FAILED ' + e); status('Storage unavailable on this browser', 'warn'); });
 })();
 </script>

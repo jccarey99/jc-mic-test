@@ -37,7 +37,7 @@ pre{white-space:pre-wrap;word-break:break-word;font:12px/1.4 ui-monospace,Menlo,
 <body>
 <main>
 <h1>JC Mic Test</h1>
-<p class="sub">Practice journal: 3 questions, read aloud, mic stays on. Audio stays on this phone. Build 2026-10-11-j1</p>
+<p class="sub">Practice journal: 3 questions, read aloud, mic stays on. Audio stays on this phone. Build 2026-10-11-j2</p>
 
 <div class="card">
   <div class="qnum" id="qnum">Not started</div>
@@ -76,8 +76,8 @@ pre{white-space:pre-wrap;word-break:break-word;font:12px/1.4 ui-monospace,Menlo,
 <script>
 (() => {
   const $ = id => document.getElementById(id);
-  const BUILD = '2026-10-11-j1';
-  const QUESTIONS = ['What time did you go to sleep last night?', 'How did you sleep, from one to ten?', 'What is your top priority today?'];
+  const BUILD = '2026-10-11-j2';
+  const QUESTIONS = ['What time did I go to sleep?', 'What time did I wake up?', 'How did I sleep? Great, OK, or Bad.'];
   const SILENCE_MS = 3000, MIN_SPEECH_MS = 800;
   const DB = 'jc-mic-test', STORE = 'chunks';
   let db, stream, track, rec, ac, analyser, buf, vadTimer;

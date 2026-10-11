@@ -1,0 +1,212 @@
+<!doctype html>
+<html lang="en">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width,initial-scale=1,viewport-fit=cover">
+<title>JC Mic Test</title>
+<style>
+:root{--bg:#f7f6f2;--fg:#1d1d1b;--muted:#6b6a65;--card:#fff;--line:#e3e1da;--go:#1f7a4d;--stop:#b3261e;--warn:#9a6700}
+@media (prefers-color-scheme:dark){:root{--bg:#161615;--fg:#f1f0ec;--muted:#a3a29c;--card:#222220;--line:#34332f;--go:#3fb47a;--stop:#e5675f;--warn:#e0b24a}}
+*{box-sizing:border-box}
+body{margin:0;background:var(--bg);color:var(--fg);font:16px/1.45 -apple-system,system-ui,sans-serif;padding:16px;padding-bottom:40px}
+main{max-width:520px;margin:0 auto}
+h1{font-size:22px;margin:4px 0 2px}
+p.sub{color:var(--muted);margin:0 0 16px;font-size:14px}
+.card{background:var(--card);border:1px solid var(--line);border-radius:14px;padding:16px;margin-bottom:14px}
+.status{font-size:18px;font-weight:600}
+.saved{font-size:15px;color:var(--muted);margin-top:4px}
+.big{font-size:44px;font-variant-numeric:tabular-nums;font-weight:700;margin:8px 0}
+button{font:inherit;font-weight:600;border:0;border-radius:12px;padding:16px;width:100%;margin-top:10px;cursor:pointer}
+#rec{background:var(--go);color:#fff}
+#stop{background:var(--stop);color:#fff}
+.sec{background:transparent;border:1px solid var(--line);color:var(--fg);padding:12px}
+button:disabled{opacity:.4}
+.warn{color:var(--warn)}
+ol{padding-left:20px;margin:6px 0}
+li{margin:4px 0}
+.take{border-top:1px solid var(--line);padding:10px 0}
+.take:first-child{border-top:0}
+audio{width:100%;margin-top:6px}
+pre{white-space:pre-wrap;word-break:break-word;font:12px/1.4 ui-monospace,Menlo,monospace;max-height:260px;overflow:auto;margin:0}
+</style>
+</head>
+<body>
+<main>
+<h1>JC Mic Test</h1>
+<p class="sub">Audio stays on this phone. Nothing is uploaded. Build 2026-10-11-c2</p>
+
+<div class="card">
+  <div class="status" id="status">Ready. Tap Record.</div>
+  <div class="big" id="clock">0:00</div>
+  <div class="saved" id="saved">Saved on phone: 0 s</div>
+  <button id="rec">Record</button>
+  <button id="stop" disabled>Stop</button>
+</div>
+
+<div class="card">
+  <strong>The 3 tests</strong>
+  <ol>
+    <li>Record about 20 s, tap Stop, play it back below.</li>
+    <li>Record, switch to another app for 5 s, come back, keep talking, Stop, play back.</li>
+    <li>Turn on airplane mode, repeat test 1.</li>
+  </ol>
+  Then tap <b>Copy results</b> and paste them to Claude.
+</div>
+
+<div class="card">
+  <strong>Saved recordings</strong>
+  <div id="takes"><p class="sub">None yet.</p></div>
+</div>
+
+<div class="card">
+  <strong>Event log</strong>
+  <button class="sec" id="copy">Copy results</button>
+  <button class="sec" id="clear">Delete all test recordings</button>
+  <pre id="log"></pre>
+</div>
+</main>
+
+<script>
+(() => {
+  const $ = id => document.getElementById(id);
+  const BUILD = '2026-10-11-c2';
+  const DB = 'jc-mic-test', STORE = 'chunks';
+  let db, stream, track, rec, take = null, seg = 0, seq = 0, startedAt = 0, savedMs = 0, tick, wantRecording = false;
+  const logLines = [];
+
+  function log(msg) {
+    const line = new Date().toISOString().slice(11, 23) + ' ' + msg;
+    logLines.push(line);
+    $('log').textContent = logLines.slice(-200).join('\n');
+  }
+  function status(t, cls) { $('status').textContent = t; $('status').className = 'status ' + (cls || ''); }
+  function fmt(ms) { const s = Math.round(ms / 1000); return Math.floor(s / 60) + ':' + String(s % 60).padStart(2, '0'); }
+
+  function openDb() {
+    return new Promise((res, rej) => {
+      const r = indexedDB.open(DB, 1);
+      r.onupgradeneeded = () => r.result.createObjectStore(STORE, { keyPath: ['take', 'seg', 'seq'] });
+      r.onsuccess = () => res(r.result);
+      r.onerror = () => rej(r.error);
+    });
+  }
+  function put(row) {
+    return new Promise((res, rej) => {
+      const tx = db.transaction(STORE, 'readwrite');
+      tx.objectStore(STORE).put(row);
+      tx.oncomplete = res; tx.onerror = () => rej(tx.error);
+    });
+  }
+  function all() {
+    return new Promise((res, rej) => {
+      const r = db.transaction(STORE).objectStore(STORE).getAll();
+      r.onsuccess = () => res(r.result); r.onerror = () => rej(r.error);
+    });
+  }
+
+  function pickType() {
+    for (const t of ['audio/mp4', 'audio/webm;codecs=opus', 'audio/webm'])
+      if (window.MediaRecorder && MediaRecorder.isTypeSupported && MediaRecorder.isTypeSupported(t)) return t;
+    return '';
+  }
+
+  // One segment = one MediaRecorder run. A take can have several segments if iOS kills the mic.
+  async function startSegment() {
+    try {
+      stream = await navigator.mediaDevices.getUserMedia({ audio: true });
+    } catch (e) {
+      log('getUserMedia FAILED ' + e.name + ': ' + e.message);
+      status('Microphone blocked: ' + e.name, 'warn');
+      wantRecording = false; buttons(); return;
+    }
+    track = stream.getAudioTracks()[0];
+    log('mic ready: ' + (track.label || 'audio') + ' state=' + track.readyState + ' muted=' + track.muted);
+    track.onmute = () => { log('track MUTE (iPhone paused mic) — still recording'); status('iPhone paused the mic. Keep going or wait…', 'warn'); };
+    track.onunmute = () => { log('track unmute'); status('Recording…'); };
+    track.onended = () => { log('track ENDED by system'); };
+
+    const type = pickType();
+    rec = new MediaRecorder(stream, type ? { mimeType: type } : undefined);
+    const mySeg = ++seg, myTake = take; let mySeq = 0;
+    rec.ondataavailable = async e => {
+      if (!e.data || !e.data.size) return;
+      const row = { take: myTake, seg: mySeg, seq: mySeq++, blob: e.data, type: rec.mimeType || type, t: Date.now() };
+      try { await put(row); savedMs += 1000; $('saved').textContent = 'Saved on phone: ' + Math.round(savedMs / 1000) + ' s'; }
+      catch (err) { log('SAVE FAILED ' + err); }
+    };
+    rec.onstop = () => {
+      log('recorder stopped (segment ' + mySeg + ')');
+      stream.getTracks().forEach(t => t.stop());
+      if (wantRecording) { // stopped by the system, not by JC
+        status('Mic was cut off. Audio so far is saved. Tap Record to continue.', 'warn');
+        wantRecording = false; buttons(); clearInterval(tick);
+      }
+      renderTakes();
+    };
+    rec.onerror = e => log('recorder ERROR ' + (e.error && e.error.name));
+    rec.start(1000);
+    log('recording segment ' + mySeg + ' as ' + (rec.mimeType || type || 'default'));
+    status('Recording…');
+  }
+
+  async function record() {
+    if (!take) { take = 'T' + new Date().toISOString().slice(5, 19).replace(/[-:T]/g, ''); seg = 0; savedMs = 0; startedAt = Date.now(); log('--- new take ' + take); }
+    wantRecording = true; buttons();
+    clearInterval(tick); tick = setInterval(() => $('clock').textContent = fmt(Date.now() - startedAt), 250);
+    await startSegment();
+  }
+
+  function stop() {
+    wantRecording = false; buttons(); clearInterval(tick);
+    if (rec && rec.state !== 'inactive') { try { rec.requestData(); } catch (e) {} rec.stop(); }
+    log('JC tapped Stop. take ' + take + ' saved ~' + Math.round(savedMs / 1000) + ' s');
+    status('Stopped. ' + Math.round(savedMs / 1000) + ' s saved. Play it below.');
+    take = null;
+  }
+
+  function buttons() { $('rec').disabled = wantRecording; $('stop').disabled = !wantRecording; $('rec').textContent = take ? 'Continue recording' : 'Record'; }
+
+  async function renderTakes() {
+    const rows = await all();
+    const groups = {};
+    rows.forEach(r => { const k = r.take + '|' + r.seg; (groups[k] = groups[k] || []).push(r); });
+    const keys = Object.keys(groups).sort().reverse();
+    const box = $('takes'); box.innerHTML = '';
+    if (!keys.length) { box.innerHTML = '<p class="sub">None yet.</p>'; return; }
+    keys.forEach(k => {
+      const g = groups[k].sort((a, b) => a.seq - b.seq);
+      const blob = new Blob(g.map(r => r.blob), { type: g[0].type || 'audio/mp4' });
+      const d = document.createElement('div'); d.className = 'take';
+      const [t, s] = k.split('|');
+      d.innerHTML = '<div><b>' + t + '</b> part ' + s + ' · ~' + g.length + ' s · ' + Math.round(blob.size / 1024) + ' KB</div>';
+      const a = document.createElement('audio'); a.controls = true; a.preload = 'metadata'; a.src = URL.createObjectURL(blob);
+      d.appendChild(a); box.appendChild(d);
+    });
+  }
+
+  document.addEventListener('visibilitychange', () => {
+    log('page ' + document.visibilityState + (wantRecording ? ' (recording continues)' : ''));
+    if (document.visibilityState === 'hidden' && rec && rec.state === 'recording') { try { rec.requestData(); } catch (e) {} }
+    if (document.visibilityState === 'visible' && track) log('on return: track=' + track.readyState + ' muted=' + track.muted + ' recorder=' + (rec && rec.state));
+  });
+  window.addEventListener('pagehide', () => { log('pagehide'); if (rec && rec.state === 'recording') try { rec.requestData(); } catch (e) {} });
+  window.addEventListener('online', () => log('network online'));
+  window.addEventListener('offline', () => log('network offline'));
+
+  $('rec').onclick = record;
+  $('stop').onclick = stop;
+  $('copy').onclick = async () => {
+    const txt = 'JC Mic Test ' + BUILD + '\n' + navigator.userAgent + '\nstandalone=' + (navigator.standalone || matchMedia('(display-mode: standalone)').matches) + '\n' + logLines.join('\n');
+    try { await navigator.clipboard.writeText(txt); log('results copied'); } catch (e) { log('copy failed — select the log text manually'); }
+  };
+  $('clear').onclick = async () => {
+    if (!confirm('Delete all test recordings on this phone?')) return;
+    db.transaction(STORE, 'readwrite').objectStore(STORE).clear().onsuccess = () => { log('test recordings deleted'); renderTakes(); };
+  };
+
+  openDb().then(d => { db = d; log('ready. build ' + BUILD + ' recorderType=' + (pickType() || 'default') + ' online=' + navigator.onLine); renderTakes(); })
+    .catch(e => { log('IndexedDB FAILED ' + e); status('Storage unavailable on this browser', 'warn'); });
+})();
+</script>
+</body>
+</html>
